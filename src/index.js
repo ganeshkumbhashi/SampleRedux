@@ -1,7 +1,23 @@
 import React from 'react';
 import ReactDOM from 'react-dom';
-import { combineReducers, createStore } from 'redux';
+import { applyMiddleware, combineReducers, createStore } from 'redux';
+import { Provider, connect } from 'react-redux';
+import { createLogger } from 'redux-logger';
+import { schema, normalize } from 'normalizr';
+import uuid from 'uuid/v4';
 import './index.css';
+
+// filters
+
+const VISIBILITY_FILTERS = {
+  SHOW_COMPLETED: item => item.completed,
+  SHOW_INCOMPLETED: item => !item.completed,
+  SHOW_ALL: item => true,
+};
+
+// schemas
+
+const todoSchema = new schema.Entity('todo');
 
 // action types
 
@@ -12,11 +28,18 @@ const FILTER_SET = 'FILTER_SET';
 // reducers
 
 const todos = [
-  { id: '0', name: 'learn redux' },
-  { id: '1', name: 'learn mobx' },
+  { id: uuid(), name: 'learn redux' },
+  { id: uuid(), name: 'learn mobx' },
 ];
 
-function todoReducer(state = todos, action) {
+const normalizedTodos = normalize(todos, [todoSchema]);
+
+const initialTodoState = {
+  entities: normalizedTodos.entities.todo,
+  ids: normalizedTodos.result,
+};
+
+function todoReducer(state = initialTodoState, action) {
   switch(action.type) {
     case TODO_ADD : {
       return applyAddTodo(state, action);
@@ -29,16 +52,18 @@ function todoReducer(state = todos, action) {
 }
 
 function applyAddTodo(state, action) {
-  const todo = Object.assign({}, action.todo, { completed: false });
-  return state.concat(todo);
+  const todo = { ...action.todo, completed: false };
+  const entities = { ...state.entities, [todo.id]: todo };
+  const ids = [ ...state.ids, action.todo.id ];
+  return { ...state, entities, ids };
 }
 
 function applyToggleTodo(state, action) {
-  return state.map(todo =>
-    todo.id === action.todo.id
-      ? Object.assign({}, todo, { completed: !todo.completed })
-      : todo
-  );
+  const id = action.todo.id;
+  const todo = state.entities[id];
+  const toggledTodo = { ...todo, completed: !todo.completed };
+  const entities = { ...state.entities, [id]: toggledTodo };
+  return { ...state, entities };
 }
 
 function filterReducer(state = 'SHOW_ALL', action) {
@@ -77,6 +102,19 @@ function doSetFilter(filter) {
   };
 }
 
+// selectors
+
+function getTodosAsIds(state) {
+  return state.todoState.ids
+    .map(id => state.todoState.entities[id])
+    .filter(VISIBILITY_FILTERS[state.filterState])
+    .map(todo => todo.id);
+}
+
+function getTodo(state, todoId) {
+  return state.todoState.entities[todoId];
+}
+
 // store
 
 const rootReducer = combineReducers({
@@ -84,23 +122,91 @@ const rootReducer = combineReducers({
   filterState: filterReducer,
 });
 
-const store = createStore(rootReducer);
+const logger = createLogger();
+
+const store = createStore(
+  rootReducer,
+  undefined,
+  applyMiddleware(logger)
+);
 
 // components
-function TodoApp({ todos, onToggleTodo }) {
-  return <TodoList
-    todos={todos}
-    onToggleTodo={onToggleTodo}
-  />;
-}
 
-function TodoList({ todos, onToggleTodo }) {
+function TodoApp() {
   return (
     <div>
-      {todos.map(todo => <TodoItem
-        key={todo.id}
-        todo={todo}
-        onToggleTodo={onToggleTodo}
+      <ConnectedFilter />
+      <ConnectedTodoCreate />
+      <ConnectedTodoList />
+    </div>
+  );
+}
+
+function Filter({ onSetFilter }) {
+  return (
+    <div>
+      Show
+      <button
+        type="text"
+        onClick={() => onSetFilter('SHOW_ALL')}>
+        All</button>
+      <button
+        type="text"
+        onClick={() => onSetFilter('SHOW_COMPLETED')}>
+        Completed</button>
+      <button
+        type="text"
+        onClick={() => onSetFilter('SHOW_INCOMPLETED')}>
+        Incompleted</button>
+    </div>
+  );
+}
+
+class TodoCreate extends React.Component {
+  constructor(props) {
+    super(props);
+
+    this.state = {
+      value: '',
+    };
+
+    this.onCreateTodo = this.onCreateTodo.bind(this);
+    this.onChangeName = this.onChangeName.bind(this);
+  }
+
+  onChangeName(event) {
+    this.setState({ value: event.target.value });
+  }
+
+  onCreateTodo(event) {
+    this.props.onAddTodo(this.state.value);
+    this.setState({ value: '' });
+    event.preventDefault();
+  }
+
+  render() {
+    return (
+      <div>
+        <form onSubmit={this.onCreateTodo}>
+          <input
+            type="text"
+            placeholder="Add Todo..."
+            value={this.state.value}
+            onChange={this.onChangeName}
+          />
+          <button type="submit">Add</button>
+        </form>
+      </div>
+    );
+  }
+}
+
+function TodoList({ todosAsIds }) {
+  return (
+    <div>
+      {todosAsIds.map(todoId => <ConnectedTodoItem
+        key={todoId}
+        todoId={todoId}
       />)}
     </div>
   );
@@ -121,15 +227,46 @@ function TodoItem({ todo, onToggleTodo }) {
   );
 }
 
-function render() {
-  ReactDOM.render(
-    <TodoApp
-      todos={store.getState().todoState}
-      onToggleTodo={id => store.dispatch(doToggleTodo(id))}
-    />,
-    document.getElementById('root')
-  );
+// Connecting React and Redux
+
+function mapStateToPropsList(state) {
+  return {
+    todosAsIds: getTodosAsIds(state),
+  };
 }
 
-store.subscribe(render);
-render();
+function mapStateToPropsItem(state, props) {
+  return {
+     todo: getTodo(state, props.todoId),
+  };
+}
+
+function mapDispatchToPropsItem(dispatch) {
+  return {
+     onToggleTodo: id => dispatch(doToggleTodo(id)),
+  };
+}
+
+function mapDispatchToPropsCreate(dispatch) {
+  return {
+    onAddTodo: name => dispatch(doAddTodo(uuid(), name)),
+  };
+}
+
+function mapDispatchToPropsFilter(dispatch) {
+  return {
+    onSetFilter: filterType => dispatch(doSetFilter(filterType)),
+  };
+}
+
+const ConnectedTodoList = connect(mapStateToPropsList)(TodoList);
+const ConnectedTodoItem = connect(mapStateToPropsItem, mapDispatchToPropsItem)(TodoItem);
+const ConnectedTodoCreate = connect(null, mapDispatchToPropsCreate)(TodoCreate);
+const ConnectedFilter = connect(null, mapDispatchToPropsFilter)(Filter);
+
+ReactDOM.render(
+  <Provider store={store}>
+    <TodoApp />
+  </Provider>,
+  document.getElementById('root')
+);
